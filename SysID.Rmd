@@ -1,0 +1,76 @@
+---
+title: "Simple Motor SysID"
+output: html_notebook
+---
+
+## Setup
+
+Change the values of the following constants according to your setup.
+
+-   CSV_PATH_FILE is the absolute path to the csv file where your log is. This can be converted from a .wpilog using the DataLogTool. It expects the file to be in table form.
+-   TIMESTAMP_PATH is the name of the field containing the timestamp in seconds from your log file. In AKit log files, it's "Timestamp".
+-   VOLTS_PATH and VELOCITY_PATH are the names of the fields containing the volts and velocity of the system you want to characterize. I've only ever tried this for AKit files, and from looking at the AScope field tree the field names are of the format: "/Field0/Field1/Field2" becomes "X.Field0.Field1.Field2". It expects this field to contain one double value, not a struct or array or anything like that.
+-   VOLTAGE_SCALE_FACTOR and VELOCITY_SCALE_FACTOR are scale factors you can use to convert the units from your log file to the desired units of your SysID gains. Generally, you want to convert to Volts and Rotations per Second.
+
+Then run this chunk.
+
+```{r}
+CSV_PATH_FILE = r"(YOUR_PATH)"
+
+TIMESTAMP_PATH = "Timestamp"
+VOLTS_PATH = "VOLTAGE_PATH"
+VELOCITY_PATH = "VELOCITY_PATH"
+
+VOLTAGE_SCALE_FACTOR = 1
+VELOCITY_SCALE_FACTOR = 1
+```
+
+This chunk reads the data from your log file and constructs a data frame consolidating the rows and removing the fields we aren't interested in. If you plan to run multiple different characterizations from the same file, you can comment out the last line, which will then hold a reference to all the data in the log file in memory so that it can be fetched again faster.
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# comment out this line if you want to run multiple characterizations from the same log file
+temp.df <- read.csv(CSV_PATH_FILE)
+
+df <- temp.df %>%
+  select(
+    Timestamp = all_of(TIMESTAMP_PATH),
+    Voltage   = all_of(VOLTS_PATH),
+    Velocity  = all_of(VELOCITY_PATH)
+  ) %>%
+  filter(
+    !is.na(Voltage) | !is.na(Velocity)
+  ) %>%
+  group_by(Timestamp) %>%
+  summarise(
+    Voltage  = first(na.omit(Voltage)) * VOLTAGE_SCALE_FACTOR,
+    Velocity = first(na.omit(Velocity)) * VELOCITY_SCALE_FACTOR,
+    .groups  = "drop"
+  ) %>%
+  arrange(Timestamp) %>%
+  fill(Voltage, Velocity, .direction = "down") %>%
+  mutate(
+    Acceleration = c(NA, diff(Velocity) / diff(Timestamp)),
+    SgnVelocity = sign(Velocity)
+  )
+
+# comment out this line if you want to run multiple characterizations from the same log file
+rm(temp.df)
+```
+
+Running this chunk gives you the SysID gains as well as a summary of the linear model used to derive those gains, from which you can determine if they are usable.
+
+```{r}
+sysid.lm <- lm(Voltage ~ SgnVelocity + Velocity + Acceleration + 0, df)
+
+cat("SysID Results\n")
+list(
+  kS = as.numeric(sysid.lm$coefficients[1]),
+  kV = as.numeric(sysid.lm$coefficients[2]),
+  kA = as.numeric(sysid.lm$coefficients[3])
+)
+
+summary(sysid.lm)
+```
